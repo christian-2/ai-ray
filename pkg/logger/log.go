@@ -11,7 +11,7 @@ var (
 func newDefaultLogger() *logrus.Logger {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.TextFormatter{DisableQuote: true})
-	logger.SetLevel(logrus.InfoLevel)
+	logger.SetLevel(logrus.InfoLevel) // TODO
 	return logger
 }
 

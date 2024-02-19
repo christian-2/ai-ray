@@ -1,13 +1,15 @@
-package bpf
+package module
 
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
-	"unsafe"
 
+	"github.com/christian-2/ai-ray/pkg/common"
 	"github.com/christian-2/ai-ray/pkg/core"
 	"github.com/christian-2/ai-ray/pkg/logger"
 	"github.com/cilium/ebpf"
@@ -20,32 +22,47 @@ var (
 	log = logger.GetLogger()
 )
 
-type Loader struct {
-	FdsMap *ebpf.Map
-	RbMap  *ebpf.Map
+type Module interface {
+	LoadAndAttach() error
 
-	file           string
-	debug          bool
-	collectionSpec *ebpf.CollectionSpec
-	collection     *ebpf.Collection
+	Start() error
+	Stop() error
+
+	Unload() error
 }
 
-func NewLoader(file string, debug bool) *Loader {
-	return &Loader{file: file, debug: debug}
+type ModuleSpec struct {
+
+	// optional ELF file where BPF program resudes
+	ObjFile string
+
+	// optional HTTP handler
+	Handler http.Handler
 }
 
-func (l *Loader) LoadAndAttach() error {
+type AbstractModule struct {
+	Module
+	Spec ModuleSpec
+
+	CollectionSpec *ebpf.CollectionSpec
+	Collection     *ebpf.Collection
+}
+
+func (a *AbstractModule) LoadAndAttach() error {
+	if a.Spec.ObjFile == "" {
+		return nil
+	}
 
 	// parse ELF file
 
 	log.WithFields(logrus.Fields{
-		"file": l.file}).
+		"objFile": a.Spec.ObjFile}).
 		Info("parse ELF file")
-	cs, err := ebpf.LoadCollectionSpec(l.file)
+	cs, err := ebpf.LoadCollectionSpec(a.Spec.ObjFile)
 	if err != nil {
 		return fmt.Errorf("cannot parse ELF file: %w", err)
 	}
-	l.collectionSpec = cs
+	a.CollectionSpec = cs
 
 	// apply workaround for cilium/ebpf issue #1327
 
@@ -60,14 +77,22 @@ func (l *Loader) LoadAndAttach() error {
 
 	// load eBPF programs and maps into kernel
 
-	bp := path.Join(core.GetBpffsMountPoint(), "ai-ray", "vm")
-	err = os.MkdirAll(bp, 0700)
+	ex, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("cannot make directory: %v", err)
+		return err
 	}
-	mo := ebpf.MapOptions{PinPath: bp}
+	b1 := filepath.Base(ex)
+	b2 := filepath.Base(a.Spec.ObjFile)
+	b2 = strings.TrimSuffix(b2, filepath.Ext(b2))
+
+	pp := path.Join(core.GetBpffsMountPoint(), b1, b2)
+	err = os.MkdirAll(pp, 0700)
+	if err != nil {
+		return err
+	}
+	mo := ebpf.MapOptions{PinPath: pp}
 	var po ebpf.ProgramOptions
-	if l.debug {
+	if common.Debug {
 		po = ebpf.ProgramOptions{
 			LogLevel: ebpf.LogLevelBranch |
 				ebpf.LogLevelInstruction |
@@ -78,64 +103,20 @@ func (l *Loader) LoadAndAttach() error {
 	log.WithFields(logrus.Fields{
 		"programs": len(cs.Programs),
 		"maps":     len(cs.Maps),
-		"pinPath":  bp}).
+		"pinPath":  pp}).
 		Info("load programs and maps into kernel")
 	c, err := ebpf.NewCollectionWithOptions(cs, opts)
 
-	if l.debug {
-		for name, p := range c.Programs {
-			l := "\n--- " + name + "\n" + p.VerifierLog + "---"
-			log.WithFields(logrus.Fields{"log": l}).Info("verifier")
-		}
+	for name, p := range c.Programs {
+		l := "\n--- " + name + "\n" + p.VerifierLog + "---"
+		log.WithFields(logrus.Fields{"log": l}).Debug("verifier")
 	}
+
 	if err != nil {
 		return fmt.Errorf("cannot load programs and maps"+
 			" into kernel: %w", err)
 	}
-	l.collection = c
-
-	// do some sanity checks on maps
-
-	for name, ms := range cs.Maps {
-		m := c.Maps[name]
-
-		var type_ ebpf.MapType
-		var keySize, valueSize uint32
-		switch ms.Name {
-		case VM_FDS:
-			l.FdsMap = m
-
-			type_ = ebpf.Hash
-			keySize = uint32(unsafe.Sizeof(FdsKey{}))
-			valueSize = uint32(unsafe.Sizeof(FdsValue{}))
-		case VM_RB:
-			l.RbMap = m
-
-			type_ = ebpf.RingBuf
-			keySize = 0
-			valueSize = 0 // variable length
-		default:
-			return fmt.Errorf("unexpected map: %v", ms.Name)
-		}
-
-		log.WithFields(logrus.Fields{
-			"name":       ms.Name,
-			"type":       ms.Type,
-			"keySize":    ms.KeySize,
-			"valueSize":  ms.ValueSize,
-			"maxEntries": ms.MaxEntries,
-			"pinning":    ms.Pinning}).
-			Info("loaded map")
-
-		if (ms.Type != type_) ||
-			(ms.KeySize != keySize) || (ms.ValueSize != valueSize) {
-			return fmt.Errorf("mismatch between Go and C parts")
-		}
-		if ms.Pinning != ebpf.PinByName {
-			return fmt.Errorf("map not automatically pinned: %v",
-				ms.Name)
-		}
-	}
+	a.Collection = c
 
 	// attach eBPF programs
 
@@ -180,14 +161,12 @@ func (l *Loader) LoadAndAttach() error {
 	return err
 }
 
-// Unload unloads eBPF programs and maps from kernel.
-func (l *Loader) Close() error {
+func (a *AbstractModule) Unload() error {
 	log.WithFields(logrus.Fields{
-		"programs": len(l.collectionSpec.Programs),
-		"maps":     len(l.collectionSpec.Maps)}).
+		"programs": len(a.CollectionSpec.Programs),
+		"maps":     len(a.CollectionSpec.Maps)}).
 		Info("freeing programs and maps")
-	l.collection.Close()
-	l.collection = nil
-
+	a.Collection.Close()
+	a.Collection = nil
 	return nil
 }

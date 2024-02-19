@@ -1,16 +1,12 @@
 
 .PHONY: all clean
 
-%.o : %.c # cancel built-in implicit rule
+NDEBUG=
 
-%.ll : %.c
-	clang -target bpf -S -D __BPF_TRACING__ -D DEBUG \
-	  -Wall -Werror -O2 -emit-llvm -g $*.c
+SUBDIRS := $(shell ls -d */)
 
-%.o : %.ll
-	llc -march bpf -filetype obj -o $*.o $*.ll
-
-all: $(shell ls *.c | sed 's/\.c$$/\.o/')
+all:
+	for dir in $(SUBDIRS); do make -C $$dir NDEBUG=$(NDEBUG); done
 
 clean:
-	rm -f *.o
+	for dir in $(SUBDIRS); do make -C $$dir clean; done

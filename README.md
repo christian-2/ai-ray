@@ -4,6 +4,11 @@ by eBPF and other specialists</p>
 
 ## Use Cases
 
+## Resources
+* [[AI Resources]]
+* [[AR Resources]]
+* [[eBPF Resources]]
+
 ## License
 
 All but the eBPF programs are licensed under Apache License, Version 2.0.

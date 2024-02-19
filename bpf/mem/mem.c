@@ -16,14 +16,14 @@ struct {
 	__type(value, struct fds_value);
 	__uint(max_entries, FDS_MAX_ENTRIES);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} VM_FDS SEC(".maps");
+} fds SEC(".maps");
 
 // map for communication from kernel space to user space
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, RB_MAX_ENTRIES);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
-} VM_RB SEC(".maps");
+} rb SEC(".maps");
 
 struct common_header {
 	__u16 common_type;
@@ -36,7 +36,7 @@ SEC("kprobe/handle_mm_fault")
 int handle_mm_fault(
 	struct pt_regs *reg
 ) {
-#ifdef DEBUG
+#ifndef NDEBUG
 	char fmt[] = "handle_mm_fault\n";
 	bpf_trace_printk(fmt, sizeof(fmt));
 #endif
@@ -48,7 +48,7 @@ SEC("tracepoint/vmscan/mm_vmscan_write_folio")
 int mm_vmscan_write_folio(
 	void *ctx
 ) {
-#ifdef DEBUG
+#ifndef NDEBUG
 	char fmt[] = "mm_vmscan_write_folio\n";
 	bpf_trace_printk(fmt, sizeof(fmt));
 #endif
@@ -71,22 +71,22 @@ SEC("tracepoint/syscalls/sys_enter_mmap")
 int sys_enter_mmap(
 	struct sys_enter_mmap_ctx *ctx
 ) {
-#ifdef DEBUG
-	char fmt[] = "sys_enter_mmap";
-	bpf_trace_printk(fmt, sizeof(fmt));
+#ifndef NDEBUG
+	char fmt[] = "sys_enter_mmap fd=%l";
+	bpf_trace_printk(fmt, sizeof(fmt), ctx->fd);
 #endif
 	struct event *e;
-	e = bpf_ringbuf_reserve(&VM_RB, sizeof(*e), 0);
+	e = bpf_ringbuf_reserve(&rb, sizeof(struct event), 0);
 	if (e == NULL) {
 		char fmt[] = "sys_enter_mmap: cannot reserve %d bytes";
-		bpf_trace_printk(fmt, sizeof(fmt), sizeof(*e));
+		bpf_trace_printk(fmt, sizeof(fmt), sizeof(struct event));
  		return 0;
 	}
 
-	e->type = EVENT_TYPE_SYS_ENTER_MMAP;
-	e->sys_enter_mmap_pid = bpf_get_current_pid_tgid() >> 32;
-	e->sys_enter_mmap_fd  = (__s32)ctx->fd;
-	
+	__u32 pid = bpf_get_current_pid_tgid() >> 32;
+	__u32 fd = ctx->fd;
+	set_event_sys_enter_mmap(e, pid, fd);
+
 	bpf_ringbuf_submit(e, 0); // w/ adaptive notification
 	return 0;
 }
@@ -103,19 +103,19 @@ SEC("tracepoint/syscalls/sys_enter_munmap")
 int sys_enter_munmap(
 	struct sys_enter_munmap_ctx *ctx
 ) {
-#ifdef DEBUG
+#ifndef NDEBUG
 	char fmt[] = "sys_enter_munmap";
 	bpf_trace_printk(fmt, sizeof(fmt));
 #endif
 	struct event *e;
-	e = bpf_ringbuf_reserve(&VM_RB, sizeof(*e), 0);
+	e = bpf_ringbuf_reserve(&rb, sizeof(struct event), 0);
 	if (e == NULL) {
 		char fmt[] = "sys_enter_munmap: cannot reserve %d bytes";
-		bpf_trace_printk(fmt, sizeof(fmt), sizeof(*e));
+		bpf_trace_printk(fmt, sizeof(fmt), sizeof(struct event));
  		return 0;
 	}
 
-	e->type = EVENT_TYPE_SYS_ENTER_MUNMAP;
+	set_event_sys_enter_munmap(e);
 	
 	bpf_ringbuf_submit(e, 0);
 	return 0;
@@ -132,20 +132,20 @@ SEC("tracepoint/syscalls/sys_exit_mmap")
 int sys_exit_mmap(
 	struct sys_exit_mmap_ctx *ctx
 ) {
-#ifdef DEBUG
-	char fmt[] = "sys_exit_mmap";
-	bpf_trace_printk(fmt, sizeof(fmt));
+#ifndef NDEBUG
+	char fmt[] = "sys_exit_mmap ret=%l";
+	bpf_trace_printk(fmt, sizeof(fmt), ctx->ret);
 #endif
 	struct event *e;
-	e = bpf_ringbuf_reserve(&VM_RB, sizeof(*e), 0);
+	e = bpf_ringbuf_reserve(&rb, sizeof(struct event), 0);
 	if (e == NULL) {
 		char fmt[] = "sys_exit_mmap: cannot reserve %d bytes";
-		bpf_trace_printk(fmt, sizeof(fmt), sizeof(*e));
+		bpf_trace_printk(fmt, sizeof(fmt), sizeof(struct event));
  		return 0;
 	}
 
-	e->type = EVENT_TYPE_SYS_EXIT_MMAP;
-	e->sys_exit_mmap_ret = (__s32)ctx->ret;
+	__s32 ret = (__s32)ctx->ret;
+	set_event_sys_exit_mmap(e, ret);
 	
 	bpf_ringbuf_submit(e, 0);
 	return 0;
@@ -162,21 +162,41 @@ SEC("tracepoint/syscalls/sys_exit_munmap")
 int sys_exit_munmap(
 	struct sys_exit_munmap_ctx *ctx
 ) {
-#ifdef DEBUG
-	char fmt[] = "sys_exit_munmap";
-	bpf_trace_printk(fmt, sizeof(fmt));
+#ifndef NDEBUG
+	char fmt[] = "sys_exit_munmap ret=%l";
+	bpf_trace_printk(fmt, sizeof(fmt), ctx->ret);
 #endif
 	struct event *e;
-	e = bpf_ringbuf_reserve(&VM_RB, sizeof(*e), 0);
+	e = bpf_ringbuf_reserve(&rb, sizeof(struct event), 0);
 	if (e == NULL) {
 		char fmt[] = "sys_exit_munmap: cannot reserve %d bytes";
-		bpf_trace_printk(fmt, sizeof(fmt), sizeof(*e));
+		bpf_trace_printk(fmt, sizeof(fmt), sizeof(struct event));
  		return 0;
 	}
-
-	e->type = EVENT_TYPE_SYS_EXIT_MUNMAP;
-	e->sys_exit_munmap_ret = (__s32)ctx->ret;
+	
+	__s32 ret = (__s32)ctx->ret;
+	set_event_sys_exit_munmap(e, ret);
 	
 	bpf_ringbuf_submit(e, 0);
 	return 0;
+}
+
+void set_event_sys_enter_mmap(struct event *e, __u32 pid, __u32 fd) {
+	e->type = EVENT_TYPE_SYS_ENTER_MMAP;
+	e->payload = ((__u64)pid << 32) | fd; // TODO
+}
+
+void set_event_sys_enter_munmap(struct event *e) {
+	e->type = EVENT_TYPE_SYS_ENTER_MUNMAP;
+	e->payload = 0;
+}
+
+void set_event_sys_exit_mmap(struct event *e, __s32 ret) {
+	e->type = EVENT_TYPE_SYS_EXIT_MMAP;
+	e->payload = ret;
+}
+
+void set_event_sys_exit_munmap(struct event *e, __s32 ret) {
+	e->type = EVENT_TYPE_SYS_EXIT_MUNMAP;
+	e->payload = ret;
 }
